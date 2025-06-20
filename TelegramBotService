@@ -1,0 +1,359 @@
+package ru.ethereal.project.java_bot.service;
+
+import com.pengrad.telegrambot.*;
+import com.pengrad.telegrambot.model.*;
+import com.pengrad.telegrambot.model.request.*;
+import com.pengrad.telegrambot.request.*;
+import com.pengrad.telegrambot.response.BaseResponse;
+import jakarta.annotation.PostConstruct;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+import ru.ethereal.project.java_bot.model.Joke;
+
+import java.util.*;
+import java.util.concurrent.*;
+
+@Slf4j
+@Service
+public class TelegramBotService {
+    private final JokeService jokeService;
+    private TelegramBot telegramBot;
+
+    private final Map<Long, String> userStates = new ConcurrentHashMap<>();
+    private final Set<Long> subscribedUsers = ConcurrentHashMap.newKeySet();
+    private final Set<Long> adminUsers = Set.of(123456789L);
+
+    @Value("${telegram.bot.token}")
+    private String botToken;
+
+    public TelegramBotService(JokeService jokeService) {
+        this.jokeService = jokeService;
+    }
+
+    @PostConstruct
+    public void init() {
+        this.telegramBot = new TelegramBot(botToken);
+        log.info("Telegram Bot initialized");
+
+        telegramBot.setUpdatesListener(updates -> {
+            updates.forEach(this::processUpdate);
+            return UpdatesListener.CONFIRMED_UPDATES_ALL;
+        });
+    }
+
+    private void processUpdate(Update update) {
+        try {
+            if (update.message() != null) {
+                handleMessage(update.message());
+            } else if (update.callbackQuery() != null) {
+                handleCallback(update.callbackQuery());
+            }
+        } catch (Exception e) {
+            log.error("Error processing update", e);
+        }
+    }
+
+    private void handleMessage(Message message) {
+        Long chatId = message.chat().id();
+        Long userId = message.from().id();
+        String text = message.text();
+
+        if (text == null) return;
+
+        String state = userStates.get(chatId);
+        if (state != null) {
+            handleUserState(chatId, userId, text, state);
+            return;
+        }
+
+        switch (text) {
+            case "/start":
+                sendMenu(chatId);
+                break;
+            case "/joke":
+                sendRandomJoke(chatId);
+                break;
+            case "/add":
+                userStates.put(chatId, "AWAITING_JOKE");
+                sendMessage(chatId, "Пришлите текст шутки:");
+                break;
+            case "/search":
+                userStates.put(chatId, "AWAITING_SEARCH");
+                sendMessage(chatId, "Введите поисковый запрос:");
+                break;
+            case "/top":
+                sendTopJokes(chatId);
+                break;
+            case "/myjokes":
+                sendUserJokes(chatId, userId);
+                break;
+            case "/all":
+                sendAllJokes(chatId);
+                break;
+            case "/subscribe":
+                subscribeUser(chatId, userId);
+                break;
+            case "/unsubscribe":
+                unsubscribeUser(chatId, userId);
+                break;
+            case "/admin":
+                if (isAdmin(userId)) {
+                    sendAdminMenu(chatId);
+                }
+                break;
+            default:
+                handleUnknownCommand(chatId);
+        }
+    }
+
+    private void sendAllJokes(Long chatId) {
+        try {
+            List<Joke> jokes = jokeService.getAllJokesList();
+            if (jokes.isEmpty()) {
+                sendMessage(chatId, "Пока нет сохраненных шуток");
+                return;
+            }
+
+            int batchSize = 10;
+            for (int i = 0; i < jokes.size(); i += batchSize) {
+                int end = Math.min(i + batchSize, jokes.size());
+                List<Joke> batch = jokes.subList(i, end);
+
+                StringBuilder sb = new StringBuilder();
+                sb.append("Все шутки (").append(jokes.size()).append("):\n\n");
+
+                for (int j = 0; j < batch.size(); j++) {
+                    Joke joke = batch.get(j);
+                    sb.append(i + j + 1).append(". ").append(joke.getText())
+                            .append("\nРейтинг: ").append(joke.getRating())
+                            .append("\nID: ").append(joke.getId()).append("\n\n");
+                }
+
+                sendMessage(chatId, sb.toString());
+                Thread.sleep(500);
+            }
+        } catch (Exception e) {
+            log.error("Error sending all jokes", e);
+            sendMessage(chatId, "Ошибка при получении списка шуток");
+        }
+    }
+
+    private void handleUserState(Long chatId, Long userId, String text, String state) {
+        switch (state) {
+            case "AWAITING_JOKE":
+                saveJoke(chatId, userId, text);
+                break;
+            case "AWAITING_SEARCH":
+                searchJokes(chatId, text);
+                break;
+        }
+        userStates.remove(chatId);
+    }
+
+    private void saveJoke(Long chatId, Long userId, String text) {
+        try {
+            Joke joke = new Joke();
+            joke.setText(text);
+            joke.setAuthorId(userId);
+            Joke savedJoke = jokeService.createJoke(joke);
+
+            telegramBot.execute(new SendMessage(chatId, "Шутка сохранена! ID: " + savedJoke.getId()));
+            log.info("User {} saved joke with id {}", userId, savedJoke.getId());
+        } catch (Exception e) {
+            log.error("Error saving joke", e);
+            telegramBot.execute(new SendMessage(chatId, "Ошибка при сохранении шутки. Попробуйте позже."));
+        }
+    }
+
+    private void handleCallback(CallbackQuery callbackQuery) {
+        String data = callbackQuery.data();
+        Message message = callbackQuery.message();
+        Long chatId = message.chat().id();
+        Long userId = callbackQuery.from().id();
+
+        if (data.startsWith("rate_")) {
+            String[] parts = data.split("_");
+            Long jokeId = Long.parseLong(parts[1]);
+            int delta = Integer.parseInt(parts[2]);
+            jokeService.rateJoke(jokeId, delta);
+            editMessageRating(chatId, message.messageId(), jokeId);
+        }
+        else if (data.startsWith("delete_") && isAdmin(userId)) {
+            Long jokeId = Long.parseLong(data.split("_")[1]);
+            jokeService.deleteJoke(jokeId);
+            deleteMessage(chatId, message.messageId());
+        }
+
+        telegramBot.execute(new AnswerCallbackQuery(callbackQuery.id()));
+    }
+
+    private void sendMenu(Long chatId) {
+        String menu = """
+        🎭 *Бот с шутками* 🎭
+        
+        📜 /joke - Случайная шутка
+        🔍 /search - Поиск шуток
+        🏆 /top - Лучшие шутки
+        📋 /all - Все шутки
+        ✏️ /add - Добавить шутку
+        📂 /myjokes - Мои шутки
+        🔔 /subscribe - Подписаться
+        🔕 /unsubscribe - Отписаться""";
+
+        sendMessage(chatId, menu);
+    }
+
+    private void sendRandomJoke(Long chatId) {
+        Joke joke = jokeService.getRandomJoke();
+        if (joke != null) {
+            sendJokeWithButtons(chatId, joke);
+        } else {
+            sendMessage(chatId, "Шутки закончились 😢");
+        }
+    }
+
+    private void sendJokeWithButtons(Long chatId, Joke joke) {
+        InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup(
+                new InlineKeyboardButton("👍 " + joke.getRating()).callbackData("rate_" + joke.getId() + "_1"),
+                new InlineKeyboardButton("👎").callbackData("rate_" + joke.getId() + "_-1")
+        );
+
+        SendMessage request = new SendMessage(chatId, joke.getText())
+                .replyMarkup(keyboard);
+        telegramBot.execute(request);
+    }
+
+    private void sendTopJokes(Long chatId) {
+        List<Joke> jokes = jokeService.getTopJokes(5);
+        if (jokes.isEmpty()) {
+            sendMessage(chatId, "Еще нет шуток с рейтингом");
+            return;
+        }
+
+        StringBuilder sb = new StringBuilder("🏆 Топ-5 шуток:\n\n");
+        for (int i = 0; i < jokes.size(); i++) {
+            Joke joke = jokes.get(i);
+            sb.append(i + 1).append(". ").append(joke.getText())
+                    .append("\nРейтинг: ").append(joke.getRating()).append("\n\n");
+        }
+        sendMessage(chatId, sb.toString());
+    }
+
+    private void searchJokes(Long chatId, String query) {
+        List<Joke> jokes = jokeService.searchJokes(query);
+        if (jokes.isEmpty()) {
+            sendMessage(chatId, "По запросу '" + query + "' ничего не найдено");
+            return;
+        }
+
+        sendMessage(chatId, "Найдено " + jokes.size() + " шуток:");
+        jokes.forEach(joke -> {
+            sendJokeWithButtons(chatId, joke);
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+    }
+
+    private void sendUserJokes(Long chatId, Long userId) {
+        List<Joke> jokes = jokeService.getUserJokes(userId);
+        if (jokes.isEmpty()) {
+            sendMessage(chatId, "Вы еще не добавляли шуток");
+            return;
+        }
+
+        sendMessage(chatId, "Ваши шутки (" + jokes.size() + "):");
+        jokes.forEach(joke -> {
+            InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup(
+                    new InlineKeyboardButton("Удалить").callbackData("delete_" + joke.getId())
+            );
+            SendMessage message = new SendMessage(chatId, joke.getText())
+                    .replyMarkup(keyboard);
+            telegramBot.execute(message);
+
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+    }
+
+    private void subscribeUser(Long chatId, Long userId) {
+        if (subscribedUsers.add(userId)) {
+            sendMessage(chatId, "✅ Вы подписались на ежедневные шутки");
+        } else {
+            sendMessage(chatId, "Вы уже подписаны");
+        }
+    }
+
+    private void unsubscribeUser(Long chatId, Long userId) {
+        if (subscribedUsers.remove(userId)) {
+            sendMessage(chatId, "❌ Вы отписались от рассылки");
+        } else {
+            sendMessage(chatId, "Вы не были подписаны");
+        }
+    }
+
+    @Scheduled(cron = "0 0 12 * * ?")
+    public void sendDailyJokes() {
+        if (subscribedUsers.isEmpty()) return;
+
+        Joke joke = jokeService.getRandomJoke();
+        if (joke == null) return;
+
+        String message = "🎭 *Шутка дня* 🎭\n\n" + joke.getText();
+
+        subscribedUsers.forEach(userId -> {
+            try {
+                telegramBot.execute(new SendMessage(userId, message));
+                Thread.sleep(1000);
+            } catch (Exception e) {
+                log.error("Error sending to user {}", userId, e);
+            }
+        });
+    }
+
+    private void sendAdminMenu(Long chatId) {
+        Map<String, Object> stats = jokeService.getStats();
+        String message = String.format(
+                "👑 *Админ-панель* 👑\n\n" +
+                        "Всего шуток: %d\n" +
+                        "Средний рейтинг: %.1f",
+                stats.get("totalJokes"),
+                stats.get("averageRating")
+        );
+        sendMessage(chatId, message);
+    }
+
+    private void editMessageRating(Long chatId, Integer messageId, Long jokeId) {
+        jokeService.getJokeById(jokeId).ifPresent(joke -> {
+            EditMessageText edit = new EditMessageText(chatId, messageId, joke.getText())
+                    .replyMarkup(new InlineKeyboardMarkup(
+                            new InlineKeyboardButton("👍 " + joke.getRating()).callbackData("rate_" + jokeId + "_1"),
+                            new InlineKeyboardButton("👎").callbackData("rate_" + jokeId + "_-1")
+                    ));
+            telegramBot.execute(edit);
+        });
+    }
+
+    private void deleteMessage(Long chatId, Integer messageId) {
+        telegramBot.execute(new DeleteMessage(chatId, messageId));
+    }
+
+    private void sendMessage(Long chatId, String text) {
+        telegramBot.execute(new SendMessage(chatId, text));
+    }
+
+    private boolean isAdmin(Long userId) {
+        return adminUsers.contains(userId);
+    }
+
+    private void handleUnknownCommand(Long chatId) {
+        sendMessage(chatId, "Неизвестная команда. Введите /start для просмотра меню");
+    }
+}
