@@ -1,0 +1,86 @@
+package ru.ethereal.project.java_bot.service;
+
+import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import ru.ethereal.project.java_bot.model.Joke;
+import ru.ethereal.project.java_bot.repository.JokeRepository;
+
+import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
+import java.util.Optional;
+
+@Service
+@RequiredArgsConstructor
+public class JokeService {
+    private final JokeRepository jokeRepository;
+
+    public Page<Joke> getAllJokes(Pageable pageable) {
+        return jokeRepository.findAll(pageable);
+    }
+
+    public List<Joke> getAllJokesList() {
+        return jokeRepository.findAll();
+    }
+
+    public Joke createJoke(Joke joke) {
+        return jokeRepository.save(joke);
+    }
+
+    public Optional<Joke> getJokeById(Long id) {
+        return jokeRepository.findById(id);
+    }
+
+    public Joke getRandomJoke() {
+        return jokeRepository.findRandomJoke();
+    }
+
+    public List<Joke> getTopJokes(int limit) {
+        return jokeRepository.findTopJokes(PageRequest.of(0, limit)).getContent();
+    }
+
+    public List<Joke> searchJokes(String query) {
+        return jokeRepository.searchByText(query);
+    }
+
+    public List<Joke> getUserJokes(Long userId) {
+        return jokeRepository.findByAuthorId(userId);
+    }
+
+    @Transactional
+    public void rateJoke(Long jokeId, int delta) {
+        jokeRepository.findById(jokeId).ifPresent(joke -> {
+            joke.setRating(joke.getRating() + delta);
+            jokeRepository.save(joke);
+        });
+    }
+
+    @Transactional
+    public Joke updateJoke(Long id, Joke jokeDetails) {
+        return jokeRepository.findById(id)
+                .map(joke -> {
+                    joke.setText(jokeDetails.getText());
+                    if (jokeDetails.getRating() != null) {
+                        joke.setRating(jokeDetails.getRating());
+                    }
+                    return jokeRepository.save(joke);
+                })
+                .orElseThrow(() -> new RuntimeException("Joke not found with id " + id));
+    }
+
+    @Transactional
+    public void deleteJoke(Long id) {
+        jokeRepository.deleteById(id);
+    }
+
+    public Map<String, Object> getStats() {
+        Map<String, Object> stats = new HashMap<>();
+        stats.put("totalJokes", jokeRepository.count());
+        stats.put("averageRating", jokeRepository.getAverageRating());
+        return stats;
+    }
+}
