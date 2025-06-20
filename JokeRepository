@@ -1,0 +1,26 @@
+package ru.ethereal.project.java_bot.repository;
+
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+import ru.ethereal.project.java_bot.model.Joke;
+
+import java.util.List;
+
+public interface JokeRepository extends JpaRepository<Joke, Long> {
+    @Query("SELECT j FROM Joke j ORDER BY j.rating DESC")
+    Page<Joke> findTopJokes(Pageable pageable);
+
+    @Query("SELECT j FROM Joke j WHERE LOWER(j.text) LIKE LOWER(CONCAT('%', :query, '%'))")
+    List<Joke> searchByText(@Param("query") String query);
+
+    List<Joke> findByAuthorId(Long authorId);
+
+    @Query(value = "SELECT * FROM jokes ORDER BY RAND() LIMIT 1", nativeQuery = true)
+    Joke findRandomJoke();
+
+    @Query("SELECT AVG(j.rating) FROM Joke j WHERE j.rating IS NOT NULL")
+    Double getAverageRating();
+}
