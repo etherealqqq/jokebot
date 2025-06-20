@@ -1,0 +1,22 @@
+package ru.ethereal.project.java_bot.config;
+
+import com.pengrad.telegrambot.TelegramBot;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class TelegramConfig {
+
+    @Value("${telegram.bot.token}")
+    private String telegramToken;
+
+    @Bean
+    TelegramBot telegramBot() {
+        if (telegramToken == null || telegramToken.isEmpty()) {
+            throw new IllegalStateException("Telegram bot token is not configured. " +
+                    "Please set TELEGRAM_BOT_TOKEN environment variable or telegram.bot.token property");
+        }
+        return new TelegramBot(telegramToken);
+    }
+}
